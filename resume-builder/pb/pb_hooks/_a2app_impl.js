@@ -799,6 +799,18 @@ function identityDoc(d) {
 }
 
 function schemaVersion(core, d, binding) {
+  // Kept until its inputs change, not rebuilt on every request (marketplace
+  // patch, toolkits/blueprint-pocketbase-kit/scripts/sync-upstream.mjs). The
+  // fingerprint hashes every operation and field one character at a time in
+  // the hooks VM: about a second for an app with HR OS's 465 operations, on
+  // every GET /api/_a2app, where the framework CLI's identity check gives up
+  // after 1.5 s and reports the app "unreachable". Its inputs are the
+  // declarations (d.key: manifest, operations and events files) and the
+  // collections, so the key is both; the value is unchanged.
+  var key = d.key + "|" + collectionsKey();
+  var store = $app.store();
+  var cached = store.get("a2app.schemaVersion");
+  if (cached && cached.key === key) return cached.value;
   var defs = binding.entities();
   var prints = {};
   var names = Object.keys(defs);
@@ -807,7 +819,27 @@ function schemaVersion(core, d, binding) {
     prints[names[i]] = { fields: def.fields, module: def.module };
     if (def.auth) prints[names[i]].auth = true;
   }
-  return core.schemaFingerprint(prints, d.operations);
+  var value = core.schemaFingerprint(prints, d.operations);
+  store.set("a2app.schemaVersion", { key: key, value: value });
+  return value;
+}
+
+// Every collection's id, name and last change. All of them, not only the
+// declared entities: a relation field carries its target's NAME, so renaming
+// another collection changes this app's fingerprint too.
+function collectionsKey() {
+  var parts = [];
+  try {
+    var cols = $app.findAllCollections();
+    for (var i = 0; i < cols.length; i++) {
+      parts.push(cols[i].id + ":" + cols[i].name + ":" + String(cols[i].updated));
+    }
+  } catch (_e) {
+    // Unknown schema: a key that never matches, so nothing stale is served.
+    return "?" + String(Date.now());
+  }
+  parts.sort();
+  return parts.join(",");
 }
 
 /**
