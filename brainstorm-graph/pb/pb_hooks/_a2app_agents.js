@@ -50,6 +50,10 @@ var MAX_SCOPES = 500;
 var CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"; // no vowels (no words), nothing that reads as a digit
 var SECRET_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 var OWNER = { principal: "owner", collection: null, name: "Owner" };
+// On an app without accounts, anyone who reaches it reads it (its shared link
+// shows it to everyone). Such a person may connect an agent that reads as they
+// do: never more, never the owner, and they manage nothing else.
+var VISITOR = { principal: "visitor", collection: null, name: "Anyone with the link", visitor: true };
 
 /* ============================================================== pure rules */
 /* No PocketBase here: `node _a2app_agents.js --selftest` runs these in Node. */
@@ -236,7 +240,7 @@ function declaredScopes(d) {
  * `write`: the call changes something, so the app's own page must prove it with
  * an Origin (a browser sends one on every change).
  */
-function managerOf(e, d, write) {
+function managerOf(e, d, write, visitorMay) {
   var x = I();
   if (x.isForeignOrigin(e)) return { reply: x.err(403, "forbidden_origin", "Refused: request Origin is not this app's own.") };
   var token = x.presentedToken(e);
@@ -260,6 +264,7 @@ function managerOf(e, d, write) {
   if (d.authMode !== "multi-user") {
     var view = write ? x.headerOf(e, "Origin") !== "" && x.isView(e) : x.isView(e);
     if (view) return { manager: OWNER };
+    if (visitorMay) return { manager: VISITOR };
     return { reply: x.err(401, "agent_token_required", "Managing this app's agents happens on its own page, or with its credential.") };
   }
   return { reply: x.err(401, "sign_in_required", "Sign in to the app first: an agent you approve acts as you.", { signInUrl: "/" }) };
@@ -361,7 +366,7 @@ function approvedBy(e, manager) {
 function review(e) {
   var x = I();
   var d = impl().decl();
-  var who = managerOf(e, d, false);
+  var who = managerOf(e, d, false, true);
   if (who.reply) return x.send(e, who.reply);
   var waiting = approvedBy(e, who.manager);
   if (waiting) {
@@ -387,7 +392,7 @@ function review(e) {
     expiresAt: new Date(row.expiresAtMs).toISOString(),
     requestedAt: row.requestedAt,
     loopback: row.loopbackPort !== null && row.loopbackPort !== undefined,
-    approver: { principal: who.manager.principal, name: who.manager.name },
+    approver: { principal: who.manager.principal, name: who.manager.name, visitor: who.manager.visitor === true },
   });
 }
 
@@ -395,7 +400,7 @@ function review(e) {
 function decide(e) {
   var x = I();
   var d = impl().decl();
-  var who = managerOf(e, d, true);
+  var who = managerOf(e, d, true, true);
   if (who.reply) return x.send(e, who.reply);
   var req = pendingRequest(e);
   if (req.reply) return x.send(e, req.reply);
@@ -409,6 +414,11 @@ function decide(e) {
   }
   var granted = narrowScopes(row.scopes, body.scopes, declaredScopes(d));
   if (granted.problem) return x.send(e, x.err(400, "usage", granted.problem));
+  if (who.manager.visitor) {
+    // A visitor's agent reads, whatever it asked for.
+    granted = { scopes: readScopesOf(Object.keys(x.makeBinding(d).entities()), d.operations, granted.scopes) };
+    if (granted.scopes.length === 0) return x.send(e, x.err(400, "usage", "This app lets visitors' agents only read, and this agent asked for nothing it can read."));
+  }
   var confirmation = newCode();
   row.status = "approved";
   row.approvedBy = who.manager.principal;
@@ -495,7 +505,7 @@ function token(e) {
 
 function issue(e, row) {
   var x = I();
-  var principalName = "Owner";
+  var principalName = row.approvedBy === VISITOR.principal ? VISITOR.name : "Owner";
   if (row.approvedCollection) {
     var account = null;
     try {

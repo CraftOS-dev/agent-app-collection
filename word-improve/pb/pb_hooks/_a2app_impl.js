@@ -1745,8 +1745,9 @@ function readableRecord(e, d, entity, id) {
   }
   var grant = grantByToken(d, presentedToken(e));
   // The owner's credential reads as the operator; anyone else (a signed-in
-  // person, or an agent acting for one) only what the collection lets them.
-  if (!isView(e) && !(grant && !isAccountGrant(grant))) {
+  // person, an agent acting for one, a visitor's agent) only what the
+  // collection lets them.
+  if (!isView(e) && !(grant && grant.principal === "owner")) {
     try {
       var rule = rec.collection().viewRule;
       var isSuper = e.auth && e.auth.isSuperuser();
@@ -1819,7 +1820,8 @@ function context(e) {
  *  looking at belong to the owner's agent. An agent acting for a person gets
  *  the person's data and operations, not those. */
 function ownerQueueRefusal(e, d) {
-  if (!isAccountGrant(grantByToken(d, presentedToken(e)))) return null;
+  var grant = grantByToken(d, presentedToken(e));
+  if (!grant || grant.principal === "owner") return null;
   return err(403, C().ERROR_CODES.INSUFFICIENT_SCOPE, "The app's agent queue, events and view context are for its owner's agent; an agent acting for a person uses the app's data and operations.");
 }
 

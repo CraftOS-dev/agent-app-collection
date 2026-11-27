@@ -215,9 +215,12 @@
       if (!r.ok) return failed(message(r, "Couldn't load this request."));
       var q = r.json;
       var reads = Array.isArray(q.readScopes) ? q.readScopes : [];
+      // An app without accounts: the agent reads what anyone with its link
+      // sees, and never more.
+      var visitor = !!(q.approver && q.approver.visitor);
       var readOnly = el("input", { type: "checkbox" });
       readOnly.checked = reads.length > 0;
-      if (reads.length === 0) readOnly.disabled = true;
+      if (reads.length === 0 || visitor) readOnly.disabled = true;
       var scopeNote = el("p", { "class": "note" });
       function describeAccess() {
         scopeNote.textContent = readOnly.checked
@@ -250,7 +253,7 @@
         el("dl", {}, [
           el("dt", { text: "Agent" }), el("dd", { "class": "name", text: q.agentName }),
           el("dt", { text: "Asked" }), el("dd", { text: ago(q.requestedAt) }),
-          el("dt", { text: "Acts as" }), el("dd", { text: (q.approver && q.approver.name) || "you" }),
+          el("dt", { text: "Acts as" }), el("dd", { text: visitor ? "Anyone with this link (read only)" : (q.approver && q.approver.name) || "you" }),
           el("dt", { text: "For" }), el("dd", { text: lasting(q.expiresIn) }),
           el("dt", { text: "Request code" }), el("dd", { "class": "name", text: q.userCode }),
         ]),
@@ -259,6 +262,7 @@
           : "After you approve, this page shows a confirmation code: copy it, go back to " + q.agentName + " and enter it there." }),
         el("label", { "class": "check" }, [readOnly, el("span", { text: "Only let it read" })]),
         scopeNote,
+        visitor ? el("p", { "class": "note", text: app.name + " has no accounts: your agent sees what anyone with this link sees, and can't change anything." }) : null,
         el("div", { "class": "warn", text: "Check that " + q.agentName + " shows the same request code, " + q.userCode + ". If it doesn't, or you didn't just connect an agent, choose Deny: someone else's request would get your access. The agent's name is whatever the requester typed." }),
         status,
         el("div", { "class": "row" }, [yes, no]),
