@@ -50,6 +50,8 @@
   ul.agents li:first-child { border-top: 0; padding-top: 0; }
   .name { font-weight: 600; overflow-wrap: anywhere; }
   .error { color: var(--danger); }
+  form label { display: block; margin: 12px 0 4px; color: var(--muted); font-size: 13px; }
+  input[type=email], input[type=password] { width: 100%; font: inherit; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -101,6 +103,27 @@
     return node;
   }
 
+  // A confirmation code is shown once, and only this tab keeps it, until the
+  // request it belongs to expires: a reload or a Back in a browser that opened
+  // this page in place of the agent's own must not lose it.
+  function keptKey(code) {
+    return "a2app.confirmation." + String(code).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  }
+  function keep(code, value) {
+    try { window.sessionStorage.setItem(keptKey(code), JSON.stringify(value)); } catch (_e) { /* not kept */ }
+  }
+  function kept(code) {
+    try {
+      var v = JSON.parse(window.sessionStorage.getItem(keptKey(code)) || "null");
+      return v && typeof v.confirmation === "string" && Date.parse(v.expiresAt) > Date.now() ? v : null;
+    } catch (_e) {
+      return null;
+    }
+  }
+  function forget(code) {
+    try { window.sessionStorage.removeItem(keptKey(code)); } catch (_e) { /* nothing kept */ }
+  }
+
   function show() {
     view.innerHTML = "";
     for (var i = 0; i < arguments.length; i++) if (arguments[i]) view.appendChild(arguments[i]);
@@ -135,15 +158,41 @@
   }
 
   function signIn(why) {
-    var back = window.location.href;
-    show(el("div", { "class": "card" }, [
-      el("p", { text: why || ("Sign in to " + app.name + " first. An agent you approve acts as you, with no more access than you have.") }),
-      el("p", { "class": "note", text: "After signing in, come back to this page: " + back }),
-      el("div", { "class": "row" }, [
-        el("a", { "class": "button primary", href: "/", target: "_blank", rel: "noopener", text: "Open " + app.name }),
-        el("button", { type: "button", text: "I've signed in", onclick: function () { route(); } }),
-      ]),
-    ]));
+    var lead = el("p", { text: why || ("Sign in to " + app.name + " first. An agent you approve acts as you, with no more access than you have.") });
+    var elsewhere = el("div", { "class": "row" }, [
+      el("a", { "class": "button", href: "/", target: "_blank", rel: "noopener", text: "Open " + app.name }),
+      el("button", { type: "button", text: "I've signed in", onclick: function () { route(); } }),
+    ]);
+    if (app.authMode !== "multi-user") {
+      return show(el("div", { "class": "card" }, [lead, el("p", { "class": "note", text: "After signing in, come back to this page: " + window.location.href }), elsewhere]));
+    }
+    // Signed in right here, with the app's own accounts (the same sign-in the
+    // app's page keeps), so the person never has to leave this page.
+    var email = el("input", { type: "email", id: "a2a-email", autocomplete: "username", required: "required" });
+    var password = el("input", { type: "password", id: "a2a-password", autocomplete: "current-password", required: "required" });
+    var status = el("p", { "class": "error", role: "alert" });
+    var go = el("button", { type: "submit", "class": "primary", text: "Sign in" });
+    var form = el("form", {}, [
+      el("label", { "for": "a2a-email", text: "Email" }), email,
+      el("label", { "for": "a2a-password", text: "Password" }), password,
+      status,
+      el("div", { "class": "row" }, [go]),
+    ]);
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      go.disabled = true;
+      status.textContent = "";
+      api("POST", "/api/collections/users/auth-with-password", { identity: email.value.trim(), password: password.value }).then(function (r) {
+        go.disabled = false;
+        if (r.ok && r.json && typeof r.json.token === "string") {
+          password.value = "";
+          try { window.localStorage.setItem(AUTH_KEY, JSON.stringify({ token: r.json.token, record: r.json.record || null })); } catch (_e) { /* signed in for this load only */ }
+          return route();
+        }
+        status.textContent = r.status === 429 ? "Too many tries. Wait a minute, then try again." : message(r, "That email and password didn't work.");
+      });
+    });
+    show(el("div", { "class": "card" }, [lead, form, el("p", { "class": "note", text: "Or sign in on " + app.name + " itself, then come back here." }), elsewhere]));
   }
 
   function failed(text) {
@@ -154,7 +203,15 @@
     document.getElementById("title").textContent = "Let an agent use " + app.name + "?";
     api("GET", "/api/_a2app/auth/device/" + encodeURIComponent(code)).then(function (r) {
       if (r.status === 401) return signIn();
-      if (r.status === 404) return failed("No sign-in request is waiting for the code " + code + ". It may have expired or been used. Ask your agent to start again.");
+      if (r.status === 409 && r.json.code === "already_approved") {
+        var held = kept(code);
+        if (held) return approved({ userCode: code, agentName: held.agentName, expiresAt: held.expiresAt }, { confirmation: held.confirmation });
+        return failed("You already approved this request, and " + (r.json.agentName || "your agent") + " is waiting for its confirmation code. This page showed it once and no longer has it: start connecting again from your agent.");
+      }
+      if (r.status === 404) {
+        forget(code);
+        return failed("No sign-in request is waiting for the code " + code + ". It may have finished, expired or been declined. If your agent still asks for a code, start connecting again from your agent.");
+      }
       if (!r.ok) return failed(message(r, "Couldn't load this request."));
       var q = r.json;
       var reads = Array.isArray(q.readScopes) ? q.readScopes : [];
@@ -195,14 +252,14 @@
           el("dt", { text: "Asked" }), el("dd", { text: ago(q.requestedAt) }),
           el("dt", { text: "Acts as" }), el("dd", { text: (q.approver && q.approver.name) || "you" }),
           el("dt", { text: "For" }), el("dd", { text: lasting(q.expiresIn) }),
-          el("dt", { text: "Code" }), el("dd", { text: q.userCode }),
+          el("dt", { text: "Request code" }), el("dd", { "class": "name", text: q.userCode }),
         ]),
         el("p", { "class": "note", text: q.loopback
           ? "The agent is waiting on this computer: approving hands it the confirmation code."
-          : "After you approve, you give the agent the confirmation code yourself." }),
+          : "After you approve, this page shows a confirmation code: copy it, go back to " + q.agentName + " and enter it there." }),
         el("label", { "class": "check" }, [readOnly, el("span", { text: "Only let it read" })]),
         scopeNote,
-        el("div", { "class": "warn", text: "Approve only a request your own agent just showed you, with the code " + q.userCode + ". The agent's name is whatever the requester typed." }),
+        el("div", { "class": "warn", text: "Check that " + q.agentName + " shows the same request code, " + q.userCode + ". If it doesn't, or you didn't just connect an agent, choose Deny: someone else's request would get your access. The agent's name is whatever the requester typed." }),
         status,
         el("div", { "class": "row" }, [yes, no]),
       ]));
@@ -211,10 +268,11 @@
 
   function approved(q, d) {
     document.getElementById("title").textContent = "Approved";
+    if (!d.redirect) keep(q.userCode, { confirmation: d.confirmation, agentName: q.agentName || null, expiresAt: q.expiresAt });
     var parts = [
-      el("p", { text: "Approved. Give this code to your agent to finish:" }),
+      el("p", { text: "Approved. Copy this confirmation code, then go back to " + (q.agentName || "your agent") + " and enter it there:" }),
       el("div", { "class": "code", text: d.confirmation }),
-      el("p", { "class": "note", text: "Never give this code to a website or another person, only to your own agent. It works once and expires with the request." }),
+      el("p", { "class": "note", text: "It works once, for this request only, until the request expires. Never give it to a website or another person. If you come back to this page in this tab, it shows the code again." }),
     ];
     var copy = el("button", { type: "button", text: "Copy code" });
     copy.addEventListener("click", function () {

@@ -346,12 +346,32 @@ function pendingRequest(e) {
   return { key: key, row: row };
 }
 
+/** The request behind {code}, when this manager approved it and its agent has
+ *  not collected the credential yet; null otherwise (no one else learns that
+ *  a request exists or what became of it). */
+function approvedBy(e, manager) {
+  var userCode = normalizeCode(codeParam(e, "code"));
+  var row = userCode === "" ? null : deviceRow(deviceKeyFor(userCode));
+  if (!row || row.status !== "approved" || !(row.expiresAtMs > Date.now())) return null;
+  if (row.approvedBy !== manager.principal || (row.approvedCollection || null) !== (manager.collection || null)) return null;
+  return row;
+}
+
 /** GET /api/_a2app/auth/device/{code} — the person sees what is asked. */
 function review(e) {
   var x = I();
   var d = impl().decl();
   var who = managerOf(e, d, false);
   if (who.reply) return x.send(e, who.reply);
+  var waiting = approvedBy(e, who.manager);
+  if (waiting) {
+    // Back on the page after approving (a reload, or a browser that opened it
+    // in place of the agent's own page): told so, not "nothing is waiting".
+    return x.send(e, x.err(409, "already_approved", "You approved this request; your agent is waiting for its confirmation code.", {
+      agentName: waiting.agentName,
+      expiresAt: new Date(waiting.expiresAtMs).toISOString(),
+    }));
+  }
   var req = pendingRequest(e);
   if (req.reply) return x.send(e, req.reply);
   var row = req.row;
