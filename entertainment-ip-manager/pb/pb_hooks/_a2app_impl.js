@@ -30,6 +30,16 @@
  * audit log) lives in `_a2app_*` collections this file creates at boot. They are
  * underscore-prefixed, so describe never publishes them as entities.
  *
+ * Agent sign-in (an agent asks, a person approves, the agent then acts as that
+ * person) lives in `_a2app_agents.js`; this file gives such a grant its
+ * standing (`actAsOperator` → `actAsAccount`) and keeps the owner's queue to
+ * the owner's agent.
+ *
+ * MAINTAINED IN THE MARKETPLACE. This adapter began as a copy of the Agent App
+ * Framework's PocketBase blueprint, but the copy it came from was never
+ * committed upstream, and the framework's adapter has since taken a different
+ * design. Change it here; `scripts/sync-upstream.mjs` no longer overwrites it.
+ *
  * Runtime: PocketBase JSVM (goja) on the 0.39 hook API. Every hook handler is a
  * one-liner in `_a2app.pb.js` that require()s this module — handlers cannot see
  * file scope (PocketBase runs each in an isolated VM).
@@ -46,6 +56,8 @@ var EVENT_RETENTION = 5000;
 var AUDIT_RETENTION = 5000;
 var VIEWER_TTL_MS = 60000;
 var REFERENCE_SCAN_LIMIT = 10;
+
+var ACCOUNT_URL = "/_a2app/account";
 
 var C_KV = "_a2app_kv";
 var C_TASKS = "_a2app_tasks";
@@ -480,9 +492,13 @@ function ownOrigins(e) {
  * The app's own View. A browser marks every request it makes: `Origin` on
  * writes, and `Sec-Fetch-Site` on everything, including the same-origin GETs
  * that carry no Origin. A program (the CLI, an agent's HTTP client) sends
- * neither, so it is never mistaken for the View.
+ * neither, so it is never mistaken for the View. A request that carries an
+ * agent credential is that agent's, whatever else it sends: the View never
+ * sends one, and an agent that added the View's marks would otherwise leave
+ * its scopes behind.
  */
 function isView(e) {
+  if (presentedToken(e) !== "") return false;
   var origin = headerOf(e, "Origin");
   if (origin !== "") return ownOrigins(e).indexOf(origin) >= 0;
   return headerOf(e, "Sec-Fetch-Site") === "same-origin";
@@ -644,32 +660,59 @@ function kvDelete(kind, key) {
 /**
  * The credential behind a token. The local grant comes from the app's
  * `.agent-token` (minted by `agent-app scaffold`/`import`): full scopes, as the
- * owner. A host may add narrower grants with `putGrant`; they are stored by the
- * SHA-256 of their token, never the token itself.
+ * owner. Other grants are stored by the SHA-256 of their token, never the token
+ * itself: an agent a person approved through agent sign-in
+ * (`_a2app_agents.js`) has that person's account as its principal
+ * (`principalCollection` names the account's auth collection) and expires.
  */
 function grantByToken(d, token) {
   if (!token) return null;
-  // A grant a host registered for this token wins: it names the credential.
+  // A grant registered for this token wins: it names the credential.
   var hit = kvGet("grant", $security.sha256(token));
   if (hit && hit.value) {
     var g = hit.value;
-    return { credentialId: g.credentialId, agentName: g.agentName || null, principal: g.principal || "owner", scopes: Array.isArray(g.scopes) ? Array.from(g.scopes) : [] };
+    return {
+      credentialId: g.credentialId,
+      agentName: g.agentName || null,
+      principal: g.principal || "owner",
+      principalCollection: g.principalCollection || null,
+      scopes: Array.isArray(g.scopes) ? Array.from(g.scopes) : [],
+      viaSignIn: g.viaSignIn === true,
+      createdAt: g.createdAt || null,
+      expiresAt: g.expiresAt || null,
+    };
   }
   if (d.localToken !== "" && $security.equal(token, d.localToken)) {
-    return { credentialId: "cred_local", agentName: null, principal: "owner", scopes: ["*"] };
+    return { credentialId: "cred_local", agentName: null, principal: "owner", principalCollection: null, scopes: ["*"], viaSignIn: false, createdAt: null, expiresAt: null };
   }
   return null;
+}
+
+/** An agent acting for one of the app's accounts, not for the owner. */
+function isAccountGrant(grant) {
+  return !!grant && grant.principal !== "owner" && typeof grant.principalCollection === "string" && grant.principalCollection !== "";
 }
 
 function putGrant(grant) {
   if (!grant || typeof grant.token !== "string" || grant.token === "") throw new Error("putGrant: a token is required");
   ensureState($app);
-  kvPut("grant", $security.sha256(grant.token), {
-    credentialId: String(grant.credentialId || "cred_" + $security.sha256(grant.token).slice(0, 8)),
-    agentName: grant.agentName ? String(grant.agentName) : null,
-    principal: String(grant.principal || "owner"),
-    scopes: Array.isArray(grant.scopes) ? grant.scopes.map(String) : ["*"],
-  });
+  var expires = grant.expiresAt ? Date.parse(grant.expiresAt) : NaN;
+  kvPut(
+    "grant",
+    $security.sha256(grant.token),
+    {
+      credentialId: String(grant.credentialId || "cred_" + $security.sha256(grant.token).slice(0, 8)),
+      agentName: grant.agentName ? String(grant.agentName) : null,
+      principal: String(grant.principal || "owner"),
+      principalCollection: grant.principalCollection ? String(grant.principalCollection) : null,
+      principalName: grant.principalName ? String(grant.principalName).slice(0, 120) : null,
+      scopes: Array.isArray(grant.scopes) ? grant.scopes.map(String) : ["*"],
+      viaSignIn: grant.viaSignIn === true,
+      createdAt: grant.createdAt ? String(grant.createdAt) : nowIso(),
+      expiresAt: isNaN(expires) ? null : new Date(expires).toISOString(),
+    },
+    isNaN(expires) ? 0 : Math.max(1, expires - Date.now()),
+  );
 }
 
 function presentedToken(e) {
@@ -785,6 +828,10 @@ function identityDoc(d) {
     dataVersion: dataVersion(),
     serverNow: nowIso(),
     serverTzOffsetMinutes: -new Date().getTimezoneOffset(),
+    authMode: d.authMode,
+    // Where a person approves an agent's sign-in and sees their agents
+    // (`_a2app_agents.js`).
+    accountUrl: ACCOUNT_URL,
   };
   var env = "";
   try {
@@ -909,7 +956,13 @@ function authorize(e, d, binding, opts) {
   var core = C();
   if (isForeignOrigin(e)) return { reply: err(403, "forbidden_origin", "Refused: request Origin is not this app's own.") };
   if (isView(e)) return { ctx: { credentialId: "ui", agentName: null, principal: "owner" } };
-  var grant = grantByToken(d, presentedToken(e));
+  var presented = presentedToken(e);
+  var grant = grantByToken(d, presented);
+  if (!grant && presented !== "") {
+    // Unknown, revoked or expired (a grant's row lapses with it): told so,
+    // rather than served as an anonymous caller (spec §9).
+    return { reply: err(401, "credential_invalid", "This agent credential is unknown, revoked or expired. Sign in again.") };
+  }
   if (!grant) {
     var pb = pbPrincipal(e);
     if (pb) return { ctx: pb };
@@ -984,13 +1037,22 @@ function reachAsScopes(access, binding, d) {
 }
 
 /**
- * Act as the app's superuser for a request carrying a valid agent credential, so
- * PocketBase's collection rules treat the agent as the app's operator — the same
- * standing an agent has always had on these apps.
+ * Give a request carrying a valid agent credential its standing in PocketBase.
+ * The owner's credential (`.agent-token`, or a grant for "owner") acts as the
+ * app's superuser, so PocketBase's collection rules treat the agent as the app's
+ * operator — the standing an agent has always had on these apps. An agent a
+ * person approved acts as THAT ACCOUNT, never as the superuser: `e.auth` becomes
+ * the person's record, so the app's own rules, roles and member gates decide.
+ * Returns null, or a refusal the caller must send.
  */
 function actAsOperator(e, d) {
+  var grant = grantByToken(d, presentedToken(e));
+  if (isAccountGrant(grant)) return actAsAccount(e, grant);
+  // The owner's agent from sign-in stands where the View that approved it
+  // does: PocketBase's rules as they apply to the View, never the superuser.
+  if (grant && grant.viaSignIn) return null;
   try {
-    if (e.auth) return;
+    if (e.auth) return null;
     var su = null;
     if (d.superuserEmail !== "") {
       try {
@@ -1007,6 +1069,88 @@ function actAsOperator(e, d) {
   } catch (_e) {
     /* no superuser: PocketBase's rules apply as for any caller */
   }
+  return null;
+}
+
+/** `actAsOperator` for an agent a person approved: the request becomes that
+ *  person's. A deleted account stops its agents; a request that also carries
+ *  someone else's sign-in is refused rather than guessed. */
+function actAsAccount(e, grant) {
+  var account = null;
+  try {
+    account = $app.findRecordById(grant.principalCollection, grant.principal);
+  } catch (_e) {
+    account = null;
+  }
+  if (!account) return err(401, "principal_inactive", "The account this agent acts for no longer exists. Sign in again.");
+  var current = null;
+  try {
+    current = e.auth || null;
+  } catch (_e) {
+    current = null;
+  }
+  if (current && !(current.id === account.id && current.collection().name === account.collection().name)) {
+    return err(403, "forbidden", "This request carries an agent credential and someone else's sign-in. Send one or the other.");
+  }
+  e.auth = account;
+  return null;
+}
+
+/** The owner's whole credential: `.agent-token`, or a grant for the owner
+ *  with every scope. It keeps the standing agents have always had here. A
+ *  grant from agent sign-in never does, even the owner's: its approver may be
+ *  no more than the app's View (any caller that can reach a single-user app),
+ *  and the protocol's "*" is the app's scopes, not PocketBase's superuser. */
+function isFullOwnerGrant(grant) {
+  return !!grant && !isAccountGrant(grant) && !grant.viaSignIn && grant.scopes.indexOf("*") >= 0;
+}
+
+var SYSTEM_API = /^\/api\/(settings|logs|backups|crons|batch|collections)(\/|$)/;
+
+/** Where any other grant — an agent acting for a person, or a narrowed grant
+ *  for the owner — may go beyond the protocol's own routes (which check their
+ *  scopes themselves). Realtime is for people. PocketBase's own system and
+ *  account routes (settings, logs, backups, refresh, password, email, OTP,
+ *  impersonation, batch) would turn a scoped agent into its principal. A
+ *  change through the app's own routes needs full access ("*"), since those
+ *  routes name no scope. */
+function limitedGrantRefusal(e, d, grant, path) {
+  var core = C();
+  var method = methodOf(e);
+  if (path === "/api/_a2app" || path.indexOf("/api/_a2app/") === 0) return null;
+  if (path === "/api/realtime" || path.indexOf("/api/realtime/") === 0) {
+    return err(403, core.ERROR_CODES.INSUFFICIENT_SCOPE, "Realtime is for signed-in people: an agent reads records through the records API, where its scopes apply.");
+  }
+  if (SYSTEM_API.test(path)) {
+    return err(403, core.ERROR_CODES.INSUFFICIENT_SCOPE, "This agent cannot use PocketBase's own system, account or batch routes; it reads and writes through the records API and the app's operations.");
+  }
+  var binding = makeBinding(d);
+  var held = expandScopes(grant, binding, d);
+  if (path === "/api/files/token") {
+    // A file token opens files in every collection, sent without this
+    // credential: only a grant that may read every entity gets one.
+    var entities = Object.keys(binding.entities());
+    for (var i = 0; i < entities.length; i++) {
+      if (held.indexOf("data:" + entities[i] + ":read") < 0) {
+        return err(403, core.ERROR_CODES.INSUFFICIENT_SCOPE, "A file token would reach files beyond this credential's scopes; fetch each file with the credential instead.", { required: "data:" + entities[i] + ":read" });
+      }
+    }
+    return null;
+  }
+  var file = /^\/api\/files\/([^\/]+)\//.exec(path);
+  if (file) {
+    var col = collectionOr(decodeURIComponent(file[1]));
+    var scope = "data:" + (col ? col.name : decodeURIComponent(file[1])) + ":read";
+    if (held.indexOf(scope) < 0) {
+      return err(403, core.ERROR_CODES.INSUFFICIENT_SCOPE, "This credential does not hold " + scope + ".", { required: scope });
+    }
+    return null;
+  }
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return null;
+  if (grant.scopes.indexOf("*") < 0) {
+    return err(403, core.ERROR_CODES.INSUFFICIENT_SCOPE, "This agent may only read, or use the app's declared operations it was given. Ask the person to approve changes.", { required: "*" });
+  }
+  return null;
 }
 
 /* =============================================================== middleware */
@@ -1051,11 +1195,17 @@ function middleware(e) {
   }
 
   // A credentialled agent call to any other path (the app's own routes, files,
-  // realtime) acts as the app's operator, as it does on the protocol paths.
+  // realtime) acts as the app's operator, as it does on the protocol paths; an
+  // agent a person approved acts as that person, within what it was given.
   var token = presentedToken(e);
   if (token !== "") {
     var d2 = decl();
-    if (grantByToken(d2, token)) actAsOperator(e, d2);
+    var grant = grantByToken(d2, token);
+    if (grant) {
+      var refused = isFullOwnerGrant(grant) ? null : limitedGrantRefusal(e, d2, grant, path);
+      if (!refused) refused = actAsOperator(e, d2);
+      if (refused) return send(e, refused);
+    }
   }
   return e.next();
 }
@@ -1083,7 +1233,10 @@ function recordsChain(e, entity, recordId) {
   if (method === "GET" || method === "HEAD") {
     var r = authorize(e, d, binding, { scope: "data:" + entity + ":read", isWrite: false });
     if (r.reply) return send(e, r.reply);
-    if (grantByToken(d, presentedToken(e))) actAsOperator(e, d);
+    if (grantByToken(d, presentedToken(e))) {
+      var readRefused = actAsOperator(e, d);
+      if (readRefused) return send(e, readRefused);
+    }
     if (recordId !== null) {
       // PocketBase's own 404 carries no machine code.
       try {
@@ -1101,7 +1254,17 @@ function recordsChain(e, entity, recordId) {
     return send(e, authz.reply);
   }
   var ctx = authz.ctx;
-  if (grantByToken(d, presentedToken(e))) actAsOperator(e, d);
+  var writer = grantByToken(d, presentedToken(e));
+  if (writer) {
+    // An agent acting for a person never changes accounts: a password or email
+    // it could set would hand it the person's whole sign-in.
+    if (isAccountGrant(writer) && def.auth) {
+      writeAudit(ctx, "data:" + entity, recordId, "rejected", core.ERROR_CODES.INSUFFICIENT_SCOPE);
+      return send(e, err(403, core.ERROR_CODES.INSUFFICIENT_SCOPE, "An agent cannot change accounts; the person does that in the app."));
+    }
+    var writeRefused = actAsOperator(e, d);
+    if (writeRefused) return send(e, writeRefused);
+  }
 
   if (method === "DELETE") {
     if (recordId === null) return send(e, err(400, "usage", "DELETE requires a record id."));
@@ -1302,7 +1465,10 @@ function preflight(e, d, op) {
     }
     kvDelete("approval", key);
   }
-  if (grantByToken(d, presentedToken(e))) actAsOperator(e, d);
+  if (grantByToken(d, presentedToken(e))) {
+    var refused = actAsOperator(e, d);
+    if (refused) return { reply: refused };
+  }
   return { state: { name: op.name, args: args, ctx: ctx, idemKey: idemKey, readOnly: op.readOnly === true } };
 }
 
@@ -1577,7 +1743,10 @@ function readableRecord(e, d, entity, id) {
   } catch (_e) {
     return null;
   }
-  if (!isView(e) && !grantByToken(d, presentedToken(e))) {
+  var grant = grantByToken(d, presentedToken(e));
+  // The owner's credential reads as the operator; anyone else (a signed-in
+  // person, or an agent acting for one) only what the collection lets them.
+  if (!isView(e) && !(grant && !isAccountGrant(grant))) {
     try {
       var rule = rec.collection().viewRule;
       var isSuper = e.auth && e.auth.isSuperuser();
@@ -1638,11 +1807,21 @@ function context(e) {
   var d = decl();
   var authz = authorize(e, d, makeBinding(d), { scope: null, isWrite: false });
   if (authz.reply) return send(e, authz.reply);
-  var c = $app.store().get("a2app.context") || { view: null, selected: [] };
+  var ownerOnly = ownerQueueRefusal(e, d);
+  if (ownerOnly) return send(e, ownerOnly);
+  var c =$app.store().get("a2app.context") || { view: null, selected: [] };
   return e.json(200, { a2app: true, view: c.view === undefined ? null : c.view, selected: Array.isArray(c.selected) ? Array.from(c.selected) : [] });
 }
 
 /* ============================================================ tasks / events */
+
+/** The app's request queue, its event feed and what the owner's View is
+ *  looking at belong to the owner's agent. An agent acting for a person gets
+ *  the person's data and operations, not those. */
+function ownerQueueRefusal(e, d) {
+  if (!isAccountGrant(grantByToken(d, presentedToken(e)))) return null;
+  return err(403, C().ERROR_CODES.INSUFFICIENT_SCOPE, "The app's agent queue, events and view context are for its owner's agent; an agent acting for a person uses the app's data and operations.");
+}
 
 function taskOf(r, appId) {
   function js(name, fallback) {
@@ -1736,6 +1915,8 @@ function tasks(e) {
   var method = methodOf(e);
   var authz = authorize(e, d, binding, { scope: null, isWrite: method !== "GET" });
   if (authz.reply) return send(e, authz.reply);
+  var ownerOnly = ownerQueueRefusal(e, d);
+  if (ownerOnly) return send(e, ownerOnly);
   var ctx = authz.ctx;
   sweep($app);
 
@@ -1868,6 +2049,8 @@ function events(e) {
   if (limited) return send(e, limited);
   var authz = authorize(e, d, makeBinding(d), { scope: null, isWrite: false });
   if (authz.reply) return send(e, authz.reply);
+  var ownerOnly = ownerQueueRefusal(e, d);
+  if (ownerOnly) return send(e, ownerOnly);
   var since = Number(queryOf(e)["since"] || 0) || 0;
   var rows = [];
   try {
@@ -2063,4 +2246,27 @@ module.exports = {
   putGrant: putGrant,
   ensureState: ensureState,
   decl: decl,
+  ACCOUNT_URL: ACCOUNT_URL,
+  // For `_a2app_agents.js` (agent sign-in), which shares this file's request
+  // helpers, key/value state and credential lookup. Not an app-facing API.
+  internals: {
+    err: err,
+    send: send,
+    headerOf: headerOf,
+    hostOf: hostOf,
+    methodOf: methodOf,
+    bodyOf: bodyOf,
+    isView: isView,
+    isForeignOrigin: isForeignOrigin,
+    presentedToken: presentedToken,
+    grantByToken: grantByToken,
+    isAccountGrant: isAccountGrant,
+    expandScopes: expandScopes,
+    makeBinding: makeBinding,
+    kvGet: kvGet,
+    kvPut: kvPut,
+    kvDelete: kvDelete,
+    nowIso: nowIso,
+    C_KV: C_KV,
+  },
 };

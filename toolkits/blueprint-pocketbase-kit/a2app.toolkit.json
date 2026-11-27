@@ -1,6 +1,6 @@
 {
  "id": "blueprint-pocketbase-kit",
- "description": "The marketplace's PocketBase toolkit: the Agent App Framework's PocketBase adapter (pinned, see framework.lock.json) for apps built with the agent-app UI kit (React + Vite in frontend/), plus the compatibility hooks those apps' own code and UIs rely on. NOT part of the framework.",
+ "description": "The marketplace's PocketBase toolkit: an A2App adapter for PocketBase (it began as the Agent App Framework's, and is maintained here; see framework.lock.json) for apps built with the agent-app UI kit (React + Vite in frontend/), plus the compatibility hooks those apps' own code and UIs rely on, and agent sign-in (another person's agent, acting as that person). NOT part of the framework.",
  "template": "template",
  "adapterVersionFrom": "pb/pb_hooks/_a2app_impl.js",
  "systemPaths": [
@@ -12,6 +12,9 @@
   "pb/pb_hooks/_a2app.pb.js",
   "pb/pb_hooks/_a2app_impl.js",
   "pb/pb_hooks/_a2app_rules.js",
+  "pb/pb_hooks/_a2app_agents.pb.js",
+  "pb/pb_hooks/_a2app_agents.js",
+  "pb/pb_hooks/a2app_account.html",
   "pb/pb_hooks/_compat_lib.js",
   "pb/pb_hooks/_compat_rules.js",
   "pb/pb_hooks/_compat_system.js",
@@ -23,12 +26,15 @@
  "adapterPaths": [
   "pb/pb_hooks/_a2app.pb.js",
   "pb/pb_hooks/_a2app_impl.js",
-  "pb/pb_hooks/_a2app_rules.js"
+  "pb/pb_hooks/_a2app_rules.js",
+  "pb/pb_hooks/_a2app_agents.pb.js",
+  "pb/pb_hooks/_a2app_agents.js",
+  "pb/pb_hooks/a2app_account.html"
  ],
  "gate": [
   {
-   "name": "hooks syntax + rules self-test",
-   "run": "node --check pb/pb_hooks/_a2app_rules.js && node --check pb/pb_hooks/_a2app_impl.js && node --check pb/pb_hooks/_a2app.pb.js && node --check pb/pb_hooks/_system.pb.js && node --check pb/pb_hooks/_triggers.pb.js && node pb/pb_hooks/_a2app_rules.js --selftest"
+   "name": "hooks syntax + rules and agent sign-in self-tests",
+   "run": "node --check pb/pb_hooks/_a2app_rules.js && node --check pb/pb_hooks/_a2app_impl.js && node --check pb/pb_hooks/_a2app.pb.js && node --check pb/pb_hooks/_a2app_agents.js && node --check pb/pb_hooks/_a2app_agents.pb.js && node --check pb/pb_hooks/_system.pb.js && node --check pb/pb_hooks/_triggers.pb.js && node pb/pb_hooks/_a2app_rules.js --selftest && node pb/pb_hooks/_a2app_agents.js --selftest"
   },
   {
    "name": "operations resolve + events declared",
