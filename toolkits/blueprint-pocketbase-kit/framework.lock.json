@@ -1,4 +1,6 @@
 {
+  "maintainedIn": "marketplace",
+  "note": "Provenance only. The adapter files began as this copy of the framework's PocketBase blueprint, which was never committed upstream; since 2026-11-27 they are edited in the marketplace (scripts/sync-upstream.mjs says why). The hashes below are of the original copy.",
   "repository": "https://github.com/CraftOS-dev/Agent-App",
   "source": "toolkits/blueprint-pocketbase-react/template",
   "commit": "b6d039db6a5cd2f2fd38f0e919eeccb339c82ccd",

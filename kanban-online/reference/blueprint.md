@@ -3,9 +3,9 @@
 The marketplace's toolkit for PocketBase apps built with the agent-app UI kit:
 a PocketBase 0.39 backend (JS hooks + migrations) and a React 19 / Vite /
 Tailwind 4 View in `frontend/`, compiled into `pb/pb_public/`. The A2App adapter
-is the Agent App Framework's own (`blueprint-pocketbase-react`, pinned in the
-toolkit's `framework.lock.json`); this toolkit adds the compatibility hooks the
-apps' own code and UIs were written against.
+began as the Agent App Framework's (`blueprint-pocketbase-react`) and is
+maintained in the marketplace; this toolkit adds the compatibility hooks the
+apps' own code and UIs were written against, and agent sign-in.
 
 If this file and the source disagree, the source wins.
 
@@ -23,7 +23,8 @@ If this file and the source disagree, the source wins.
 | `frontend/**` | **agent** | the View, including its copy of the UI kit (`frontend/src/kit`). |
 | `manifest.json` | SYSTEM | identity, modules and their collections, `authMode`, the pipeline. |
 | `pb-serve.mjs`, `pb-fetch.mjs`, `pb-check.mjs`, `pb-build.mjs` | SYSTEM | launcher, pinned PocketBase fetcher, gate checks, fingerprinted View build. |
-| `pb/pb_hooks/_a2app.pb.js`, `_a2app_impl.js`, `_a2app_rules.js` | SYSTEM | the framework's A2App adapter. |
+| `pb/pb_hooks/_a2app.pb.js`, `_a2app_impl.js`, `_a2app_rules.js` | SYSTEM | the A2App adapter. |
+| `pb/pb_hooks/_a2app_agents.pb.js`, `_a2app_agents.js`, `a2app_account.html` | SYSTEM | agent sign-in: another person's agent asks, the person approves on `/_a2app/account`, and the agent acts as that person. |
 | `pb/pb_hooks/_system.pb.js`, `_compat_system.js`, `_compat_lib.js`, `_compat_rules.js` | SYSTEM | what the apps' UIs relied on: the SPA no-store header, the 1.9.0 write guard for the View's own writes, the credential check on the app's own operation routes, the multi-user operations gate, rate limits, the console and coverage relays. |
 | `pb/pb_hooks/_triggers.pb.js`, `_triggers_lib.js` | SYSTEM | the `agent_requests` queue the UI fires into and watches; every landed row becomes an A2App task, and the row follows the task. |
 | `pb/pb_hooks/_craftbot_bridge.js` | SYSTEM | `callLLM` (answered by the framework bridge's harness, or CraftBot), `callAction`/`callIntegration` (CraftBot only). |
@@ -34,6 +35,7 @@ If this file and the source disagree, the source wins.
 - **Records:** `a2app <app> data <collection> list|get|create|update|delete` for the collections the manifest lists.
 - **Work the app asks for:** `a2app <app> tasks next` (or `agent-app <app> bridge start`), then `tasks progress` / `tasks complete`. AGENT_APP.md § Work the app asks for says how to do each capability.
 - **Who the agent is:** the app's `.agent-token`, sent as `X-A2App-Token`, makes the agent the app's operator (PocketBase's superuser), exactly as agents have always operated these apps.
+- **Other people's agents:** on a multi-user app, anyone with an account can connect their own agent: `a2app <app url> login` shows a link to `/_a2app/account#approve/<code>`, the person approves it while signed in, and the agent finishes with the confirmation code the page shows (`login --confirm <code>`). That agent acts as the person who approved it: `e.auth` is their record, so the collection rules, roles and member gates the app already has decide what it may do. It is read-only unless the person allows changes. It never gets the app's queue (`tasks`, `events`, `context`), realtime, PocketBase's account routes, or writes to an auth collection. The person sees and revokes their agents on `/_a2app/account`.
 
 ## Adding an operation
 

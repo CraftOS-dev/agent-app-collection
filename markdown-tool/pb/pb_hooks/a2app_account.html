@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Agents</title>
+<!--
+  The account page of an app built on the marketplace kit (SYSTEM-OWNED; served
+  at /_a2app/account by _a2app_agents.js). A person approves an agent's sign-in
+  here (#approve/<code>) and sees and revokes their agents (home). It uses the
+  app's own sign-in: the PocketBase token the app keeps in this browser
+  (localStorage "pocketbase_auth", the PocketBase SDK's default), sent as
+  Authorization, so an approved agent acts as the person who approved it.
+-->
+<style>
+  :root {
+    --bg: #f7f7f8; --card: #ffffff; --text: #1d1d21; --muted: #62636b; --line: #e2e2e6;
+    --accent: #3d5afe; --accent-text: #ffffff; --danger: #c62828; --warn-bg: #fff6e5; --warn-line: #f0c36d;
+    --code-bg: #f0f1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141417; --card: #1d1d22; --text: #ececf1; --muted: #a0a1ab; --line: #2e2e35;
+      --accent: #7b8cff; --accent-text: #0f0f12; --danger: #ef7070; --warn-bg: #2b2414; --warn-line: #6b5420;
+      --code-bg: #26262d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  dl { margin: 0 0 16px; display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  .note { color: var(--muted); font-size: 13px; }
+  .warn { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 10px 12px; font-size: 14px; margin: 16px 0; }
+  label.check { display: flex; gap: 10px; align-items: flex-start; margin: 12px 0 4px; cursor: pointer; }
+  label.check input { margin-top: 4px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+  button, a.button { font: inherit; border-radius: 8px; padding: 9px 16px; border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer; text-decoration: none; display: inline-block; }
+  button.primary, a.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .6; cursor: default; }
+  .code { font: 600 28px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 2px; background: var(--code-bg); border-radius: 8px; padding: 14px; text-align: center; margin: 12px 0; user-select: all; }
+  ul.agents { list-style: none; margin: 0; padding: 0; }
+  ul.agents li { border-top: 1px solid var(--line); padding: 12px 0; display: flex; gap: 12px; justify-content: space-between; align-items: flex-start; }
+  ul.agents li:first-child { border-top: 0; padding-top: 0; }
+  .name { font-weight: 600; overflow-wrap: anywhere; }
+  .error { color: var(--danger); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Agents</h1>
+  <p class="sub" id="subtitle"></p>
+  <div id="view"><div class="card"><p class="note">Loading…</p></div></div>
+</main>
+<script>
+(function () {
+  "use strict";
+  var AUTH_KEY = "pocketbase_auth";
+  var app = { name: "this app", authMode: "none" };
+  var view = document.getElementById("view");
+
+  function token() {
+    try {
+      var raw = window.localStorage.getItem(AUTH_KEY);
+      if (!raw) return "";
+      var stored = JSON.parse(raw);
+      return stored && typeof stored.token === "string" ? stored.token : "";
+    } catch (_e) {
+      return "";
+    }
+  }
+
+  function api(method, path, body) {
+    var headers = { Accept: "application/json" };
+    var t = token();
+    if (t) headers.Authorization = t;
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    return fetch(path, { method: method, headers: headers, credentials: "same-origin", body: body === undefined ? undefined : JSON.stringify(body) })
+      .then(function (res) {
+        return res.json().then(function (json) { return { ok: res.ok, status: res.status, json: json || {} }; }, function () { return { ok: res.ok, status: res.status, json: {} }; });
+      }, function () {
+        return { ok: false, status: 0, json: { message: "The app did not answer. Check your connection and try again." } };
+      });
+  }
+
+  function el(tag, attrs, children) {
+    var node = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) {
+      if (k === "text") node.textContent = attrs[k];
+      else if (k === "onclick") node.addEventListener("click", attrs[k]);
+      else node.setAttribute(k, attrs[k]);
+    });
+    (children || []).forEach(function (c) { if (c) node.appendChild(c); });
+    return node;
+  }
+
+  function show() {
+    view.innerHTML = "";
+    for (var i = 0; i < arguments.length; i++) if (arguments[i]) view.appendChild(arguments[i]);
+  }
+
+  function ago(iso) {
+    var t = Date.parse(iso);
+    if (isNaN(t)) return "";
+    var s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.round(s / 60) + " min ago";
+    if (s < 86400) return Math.round(s / 3600) + " h ago";
+    return new Date(t).toLocaleString();
+  }
+
+  function day(iso) {
+    var t = Date.parse(iso);
+    return isNaN(t) ? "" : new Date(t).toLocaleDateString();
+  }
+
+  function message(r, fallback) {
+    return (r && r.json && r.json.message) || fallback;
+  }
+
+  function signIn(why) {
+    var back = window.location.href;
+    show(el("div", { "class": "card" }, [
+      el("p", { text: why || ("Sign in to " + app.name + " first. An agent you approve acts as you, with no more access than you have.") }),
+      el("p", { "class": "note", text: "After signing in, come back to this page: " + back }),
+      el("div", { "class": "row" }, [
+        el("a", { "class": "button primary", href: "/", target: "_blank", rel: "noopener", text: "Open " + app.name }),
+        el("button", { type: "button", text: "I've signed in", onclick: function () { route(); } }),
+      ]),
+    ]));
+  }
+
+  function failed(text) {
+    show(el("div", { "class": "card" }, [el("p", { "class": "error", text: text })]));
+  }
+
+  function approve(code) {
+    document.getElementById("title").textContent = "Let an agent use " + app.name + "?";
+    api("GET", "/api/_a2app/auth/device/" + encodeURIComponent(code)).then(function (r) {
+      if (r.status === 401) return signIn();
+      if (r.status === 404) return failed("No sign-in request is waiting for the code " + code + ". It may have expired or been used. Ask your agent to start again.");
+      if (!r.ok) return failed(message(r, "Couldn't load this request."));
+      var q = r.json;
+      var reads = Array.isArray(q.readScopes) ? q.readScopes : [];
+      var readOnly = el("input", { type: "checkbox" });
+      readOnly.checked = reads.length > 0;
+      if (reads.length === 0) readOnly.disabled = true;
+      var scopeNote = el("p", { "class": "note" });
+      function describeAccess() {
+        scopeNote.textContent = readOnly.checked
+          ? "It can look at what you can see in " + app.name + ", but not change anything."
+          : "It can do everything you can do in " + app.name + ", including changes.";
+      }
+      readOnly.addEventListener("change", describeAccess);
+      describeAccess();
+      var status = el("p", { "class": "error", role: "alert" });
+      var yes = el("button", { type: "button", "class": "primary", text: "Approve" });
+      var no = el("button", { type: "button", text: "Deny" });
+      function decide(ok) {
+        yes.disabled = no.disabled = true;
+        status.textContent = "";
+        var body = { approve: ok };
+        if (ok && readOnly.checked) body.scopes = reads;
+        api("POST", "/api/_a2app/auth/device/" + encodeURIComponent(code), body).then(function (d) {
+          if (!d.ok) {
+            yes.disabled = no.disabled = false;
+            status.textContent = d.status === 401 ? "Your sign-in to " + app.name + " has ended. Sign in again, then retry." : message(d, "That didn't work. Try again.");
+            return;
+          }
+          if (!ok) return show(el("div", { "class": "card" }, [el("p", { text: "Declined. The agent won't get access." })]));
+          approved(q, d.json);
+        });
+      }
+      yes.addEventListener("click", function () { decide(true); });
+      no.addEventListener("click", function () { decide(false); });
+      show(el("div", { "class": "card" }, [
+        el("dl", {}, [
+          el("dt", { text: "Agent" }), el("dd", { "class": "name", text: q.agentName }),
+          el("dt", { text: "Asked" }), el("dd", { text: ago(q.requestedAt) }),
+          el("dt", { text: "Acts as" }), el("dd", { text: (q.approver && q.approver.name) || "you" }),
+          el("dt", { text: "Code" }), el("dd", { text: q.userCode }),
+        ]),
+        el("label", { "class": "check" }, [readOnly, el("span", { text: "Only let it read" })]),
+        scopeNote,
+        el("div", { "class": "warn", text: "Approve only a request your own agent just showed you, with the code " + q.userCode + ". The agent's name is whatever the requester typed." }),
+        status,
+        el("div", { "class": "row" }, [yes, no]),
+      ]));
+    });
+  }
+
+  function approved(q, d) {
+    document.getElementById("title").textContent = "Approved";
+    var parts = [
+      el("p", { text: "Approved. Give this code to your agent to finish:" }),
+      el("div", { "class": "code", text: d.confirmation }),
+      el("p", { "class": "note", text: "Never give this code to a website or another person, only to your own agent. It works once and expires with the request." }),
+    ];
+    var copy = el("button", { type: "button", text: "Copy code" });
+    copy.addEventListener("click", function () {
+      try {
+        navigator.clipboard.writeText(d.confirmation).then(function () { copy.textContent = "Copied"; });
+      } catch (_e) { /* select it by hand */ }
+    });
+    parts.push(el("div", { "class": "row" }, [copy, el("a", { "class": "button", href: "#", text: "See your agents" })]));
+    show(el("div", { "class": "card" }, parts));
+    // An agent's page that embeds this one gets the code without retyping.
+    if (window.parent && window.parent !== window) {
+      try { window.parent.postMessage({ a2app: "confirmation", userCode: q.userCode, confirmation: d.confirmation }, "*"); } catch (_e) { /* not embedded after all */ }
+    }
+    // An agent waiting on this computer takes the code itself.
+    if (d.redirect) window.location.assign(d.redirect);
+  }
+
+  function home() {
+    document.getElementById("title").textContent = "Your agents in " + app.name;
+    api("GET", "/api/_a2app/credentials").then(function (r) {
+      if (r.status === 401) return signIn("Sign in to " + app.name + " to see the agents you've connected.");
+      if (!r.ok) return failed(message(r, "Couldn't load your agents."));
+      var who = r.json.signedInAs && r.json.signedInAs.name;
+      document.getElementById("subtitle").textContent = who ? "Signed in as " + who + "." : "";
+      var list = Array.isArray(r.json.credentials) ? r.json.credentials : [];
+      if (list.length === 0) {
+        return show(el("div", { "class": "card" }, [
+          el("p", { text: "No agents are connected." }),
+          el("p", { "class": "note", text: "To connect one, start the sign-in from your agent. It shows you a link to approve here." }),
+        ]));
+      }
+      var items = list.map(function (c) {
+        var revoke = el("button", { type: "button", "class": "danger", text: "Revoke" });
+        revoke.addEventListener("click", function () {
+          revoke.disabled = true;
+          api("DELETE", "/api/_a2app/credentials/" + encodeURIComponent(c.credentialId)).then(function (d) {
+            if (d.ok) return home();
+            revoke.disabled = false;
+            window.alert(message(d, "Couldn't revoke it."));
+          });
+        });
+        return el("li", {}, [
+          el("div", {}, [
+            el("div", { "class": "name", text: c.agentName || "Agent" }),
+            el("div", { "class": "note", text: (c.readOnly ? "Read only" : "Everything you can do") + " · connected " + day(c.createdAt) + (c.expiresAt ? " · until " + day(c.expiresAt) : "") }),
+          ]),
+          revoke,
+        ]);
+      });
+      show(el("div", { "class": "card" }, [el("ul", { "class": "agents" }, items)]));
+    });
+  }
+
+  function route() {
+    var hash = window.location.hash.replace(/^#/, "");
+    var m = /^approve\/(.+)$/.exec(hash);
+    document.getElementById("subtitle").textContent = "";
+    if (m) return approve(decodeURIComponent(m[1]));
+    if (hash === "approve") return failed("Open the full link your agent showed you: it ends with the request's code.");
+    return home();
+  }
+
+  window.addEventListener("hashchange", route);
+  api("GET", "/api/_a2app").then(function (r) {
+    if (r.ok && r.json && r.json.app) {
+      app.name = r.json.app.name || r.json.app.id || app.name;
+      app.authMode = r.json.authMode || app.authMode;
+      document.title = "Agents · " + app.name;
+    }
+    route();
+  });
+})();
+</script>
+</body>
+</html>

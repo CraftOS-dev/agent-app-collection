@@ -6,9 +6,9 @@
  *   node tools/agent-app-migrate/sync-system.mjs <app-folder> [...]   (or --all)
  *
  * The repository's counterpart of `agent-app <dir> toolkit-sync` for the copies
- * published here: run it after `toolkits/blueprint-pocketbase-kit` changes (for
- * example after `scripts/sync-upstream.mjs` pulled a new framework adapter), so
- * every published app ships the toolkit's current system files. App-owned files
+ * published here: run it after `toolkits/blueprint-pocketbase-kit` changes (its
+ * adapter is maintained in the marketplace, in the kit's template), so every
+ * published app ships the toolkit's current system files. App-owned files
  * are never touched; manifest.json keeps its content and only its hash is
  * re-recorded.
  */
