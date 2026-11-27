@@ -492,9 +492,13 @@ function ownOrigins(e) {
  * The app's own View. A browser marks every request it makes: `Origin` on
  * writes, and `Sec-Fetch-Site` on everything, including the same-origin GETs
  * that carry no Origin. A program (the CLI, an agent's HTTP client) sends
- * neither, so it is never mistaken for the View.
+ * neither, so it is never mistaken for the View. A request that carries an
+ * agent credential is that agent's, whatever else it sends: the View never
+ * sends one, and an agent that added the View's marks would otherwise leave
+ * its scopes behind.
  */
 function isView(e) {
+  if (presentedToken(e) !== "") return false;
   var origin = headerOf(e, "Origin");
   if (origin !== "") return ownOrigins(e).indexOf(origin) >= 0;
   return headerOf(e, "Sec-Fetch-Site") === "same-origin";
@@ -673,12 +677,13 @@ function grantByToken(d, token) {
       principal: g.principal || "owner",
       principalCollection: g.principalCollection || null,
       scopes: Array.isArray(g.scopes) ? Array.from(g.scopes) : [],
+      viaSignIn: g.viaSignIn === true,
       createdAt: g.createdAt || null,
       expiresAt: g.expiresAt || null,
     };
   }
   if (d.localToken !== "" && $security.equal(token, d.localToken)) {
-    return { credentialId: "cred_local", agentName: null, principal: "owner", principalCollection: null, scopes: ["*"], createdAt: null, expiresAt: null };
+    return { credentialId: "cred_local", agentName: null, principal: "owner", principalCollection: null, scopes: ["*"], viaSignIn: false, createdAt: null, expiresAt: null };
   }
   return null;
 }
@@ -702,6 +707,7 @@ function putGrant(grant) {
       principalCollection: grant.principalCollection ? String(grant.principalCollection) : null,
       principalName: grant.principalName ? String(grant.principalName).slice(0, 120) : null,
       scopes: Array.isArray(grant.scopes) ? grant.scopes.map(String) : ["*"],
+      viaSignIn: grant.viaSignIn === true,
       createdAt: grant.createdAt ? String(grant.createdAt) : nowIso(),
       expiresAt: isNaN(expires) ? null : new Date(expires).toISOString(),
     },
@@ -950,7 +956,13 @@ function authorize(e, d, binding, opts) {
   var core = C();
   if (isForeignOrigin(e)) return { reply: err(403, "forbidden_origin", "Refused: request Origin is not this app's own.") };
   if (isView(e)) return { ctx: { credentialId: "ui", agentName: null, principal: "owner" } };
-  var grant = grantByToken(d, presentedToken(e));
+  var presented = presentedToken(e);
+  var grant = grantByToken(d, presented);
+  if (!grant && presented !== "") {
+    // Unknown, revoked or expired (a grant's row lapses with it): told so,
+    // rather than served as an anonymous caller (spec §9).
+    return { reply: err(401, "credential_invalid", "This agent credential is unknown, revoked or expired. Sign in again.") };
+  }
   if (!grant) {
     var pb = pbPrincipal(e);
     if (pb) return { ctx: pb };
@@ -1036,6 +1048,9 @@ function reachAsScopes(access, binding, d) {
 function actAsOperator(e, d) {
   var grant = grantByToken(d, presentedToken(e));
   if (isAccountGrant(grant)) return actAsAccount(e, grant);
+  // The owner's agent from sign-in stands where the View that approved it
+  // does: PocketBase's rules as they apply to the View, never the superuser.
+  if (grant && grant.viaSignIn) return null;
   try {
     if (e.auth) return null;
     var su = null;
@@ -1082,9 +1097,12 @@ function actAsAccount(e, grant) {
 }
 
 /** The owner's whole credential: `.agent-token`, or a grant for the owner
- *  with every scope. It keeps the standing agents have always had here. */
+ *  with every scope. It keeps the standing agents have always had here. A
+ *  grant from agent sign-in never does, even the owner's: its approver may be
+ *  no more than the app's View (any caller that can reach a single-user app),
+ *  and the protocol's "*" is the app's scopes, not PocketBase's superuser. */
 function isFullOwnerGrant(grant) {
-  return !!grant && !isAccountGrant(grant) && grant.scopes.indexOf("*") >= 0;
+  return !!grant && !isAccountGrant(grant) && !grant.viaSignIn && grant.scopes.indexOf("*") >= 0;
 }
 
 var SYSTEM_API = /^\/api\/(settings|logs|backups|crons|batch|collections)(\/|$)/;
@@ -1106,12 +1124,24 @@ function limitedGrantRefusal(e, d, grant, path) {
   if (SYSTEM_API.test(path)) {
     return err(403, core.ERROR_CODES.INSUFFICIENT_SCOPE, "This agent cannot use PocketBase's own system, account or batch routes; it reads and writes through the records API and the app's operations.");
   }
-  if (path === "/api/files/token") return null;
+  var binding = makeBinding(d);
+  var held = expandScopes(grant, binding, d);
+  if (path === "/api/files/token") {
+    // A file token opens files in every collection, sent without this
+    // credential: only a grant that may read every entity gets one.
+    var entities = Object.keys(binding.entities());
+    for (var i = 0; i < entities.length; i++) {
+      if (held.indexOf("data:" + entities[i] + ":read") < 0) {
+        return err(403, core.ERROR_CODES.INSUFFICIENT_SCOPE, "A file token would reach files beyond this credential's scopes; fetch each file with the credential instead.", { required: "data:" + entities[i] + ":read" });
+      }
+    }
+    return null;
+  }
   var file = /^\/api\/files\/([^\/]+)\//.exec(path);
   if (file) {
     var col = collectionOr(decodeURIComponent(file[1]));
     var scope = "data:" + (col ? col.name : decodeURIComponent(file[1])) + ":read";
-    if (expandScopes(grant, makeBinding(d), d).indexOf(scope) < 0) {
+    if (held.indexOf(scope) < 0) {
       return err(403, core.ERROR_CODES.INSUFFICIENT_SCOPE, "This credential does not hold " + scope + ".", { required: scope });
     }
     return null;

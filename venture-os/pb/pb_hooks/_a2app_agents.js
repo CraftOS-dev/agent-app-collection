@@ -507,6 +507,7 @@ function issue(e, row) {
     principalCollection: row.approvedCollection || null,
     principalName: principalName,
     scopes: credential.scopes,
+    viaSignIn: true,
     createdAt: credential.createdAt,
     expiresAt: credential.expiresAt,
   });
@@ -618,6 +619,9 @@ function accountPage(e) {
   try {
     e.response.header().set("Cache-Control", "no-store");
     e.response.header().set("Referrer-Policy", "no-referrer");
+    // Never inside another page: one that framed it could steer the person's
+    // click onto Approve for a request of its own.
+    e.response.header().set("Content-Security-Policy", "frame-ancestors 'self'");
   } catch (_e) {
     /* header plumbing unavailable */
   }

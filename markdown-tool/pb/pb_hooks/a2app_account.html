@@ -116,6 +116,15 @@
     return new Date(t).toLocaleString();
   }
 
+  /** How long the access it asks for lasts, from seconds. */
+  function lasting(seconds) {
+    var s = Number(seconds);
+    if (!(s > 0)) return "";
+    if (s >= 86400) { var d = Math.round(s / 86400); return d + (d === 1 ? " day" : " days"); }
+    if (s >= 3600) { var h = Math.round(s / 3600); return h + (h === 1 ? " hour" : " hours"); }
+    return Math.max(1, Math.round(s / 60)) + " min";
+  }
+
   function day(iso) {
     var t = Date.parse(iso);
     return isNaN(t) ? "" : new Date(t).toLocaleDateString();
@@ -185,8 +194,12 @@
           el("dt", { text: "Agent" }), el("dd", { "class": "name", text: q.agentName }),
           el("dt", { text: "Asked" }), el("dd", { text: ago(q.requestedAt) }),
           el("dt", { text: "Acts as" }), el("dd", { text: (q.approver && q.approver.name) || "you" }),
+          el("dt", { text: "For" }), el("dd", { text: lasting(q.expiresIn) }),
           el("dt", { text: "Code" }), el("dd", { text: q.userCode }),
         ]),
+        el("p", { "class": "note", text: q.loopback
+          ? "The agent is waiting on this computer: approving hands it the confirmation code."
+          : "After you approve, you give the agent the confirmation code yourself." }),
         el("label", { "class": "check" }, [readOnly, el("span", { text: "Only let it read" })]),
         scopeNote,
         el("div", { "class": "warn", text: "Approve only a request your own agent just showed you, with the code " + q.userCode + ". The agent's name is whatever the requester typed." }),
@@ -211,11 +224,8 @@
     });
     parts.push(el("div", { "class": "row" }, [copy, el("a", { "class": "button", href: "#", text: "See your agents" })]));
     show(el("div", { "class": "card" }, parts));
-    // An agent's page that embeds this one gets the code without retyping.
-    if (window.parent && window.parent !== window) {
-      try { window.parent.postMessage({ a2app: "confirmation", userCode: q.userCode, confirmation: d.confirmation }, "*"); } catch (_e) { /* not embedded after all */ }
-    }
-    // An agent waiting on this computer takes the code itself.
+    // The code goes only where the person puts it (this page is never framed),
+    // or to an agent waiting on this computer, which takes it itself.
     if (d.redirect) window.location.assign(d.redirect);
   }
 
